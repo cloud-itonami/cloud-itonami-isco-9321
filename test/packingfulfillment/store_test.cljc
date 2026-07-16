@@ -1,0 +1,62 @@
+(ns packingfulfillment.store-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [packingfulfillment.store :as store]))
+
+(deftest test-create-store
+  (testing "Create a new store"
+    (let [s (store/create-store)]
+      (is (not (nil? s)))
+      (is (satisfies? store/Store s)))))
+
+(deftest test-register-practitioner
+  (testing "Register and retrieve a practitioner"
+    (let [s (store/create-store)
+          s' (store/register-practitioner! s "prac-001" {:name "Alex Chen" :status :active})
+          retrieved (store/practitioner s' "prac-001")]
+      (is (= (:name retrieved) "Alex Chen"))
+      (is (= (:status retrieved) :active)))))
+
+(deftest test-unregistered-practitioner-returns-nil
+  (testing "Unknown practitioner id returns nil, not an error"
+    (let [s (store/create-store)]
+      (is (nil? (store/practitioner s "no-such-practitioner"))))))
+
+(deftest test-register-order
+  (testing "Register and retrieve an order's ground-truth record"
+    (let [s (store/create-store)
+          s' (store/register-order! s "order-001" {:declared-item-count 12})
+          retrieved (store/order s' "order-001")]
+      (is (= (:declared-item-count retrieved) 12)))))
+
+(deftest test-add-record
+  (testing "Add and retrieve records from the audit ledger"
+    (let [s (store/create-store)
+          s' (store/add-record! s :order-pack {:order-id "order-001" :item-count 12})
+          records (store/records s')]
+      (is (= (count records) 1))
+      (is (= (:type (first records)) :order-pack))
+      (is (:timestamp (first records))))))
+
+(deftest test-add-record-preserves-append-order
+  (testing "Ledger accumulates records in append order"
+    (let [s (-> (store/create-store)
+                (store/add-record! :order-pack {:order-id "o1"})
+                (store/add-record! :quality-check {:order-id "o1"}))
+          records (store/records s)]
+      (is (= (count records) 2))
+      (is (= (mapv :type records) [:order-pack :quality-check])))))
+
+(deftest test-immutability
+  (testing "Store operations return new store instances, never mutate in place"
+    (let [s (store/create-store)
+          s' (store/register-practitioner! s "prac-001" {:name "Alex Chen"})
+          prac-in-s (store/practitioner s "prac-001")
+          prac-in-s' (store/practitioner s' "prac-001")]
+      (is (nil? prac-in-s))
+      (is (not (nil? prac-in-s')))
+      (is (= (:name prac-in-s') "Alex Chen")))))
+
+(deftest test-empty-store-has-empty-ledger
+  (testing "A freshly created store has an empty audit ledger"
+    (let [s (store/create-store)]
+      (is (= [] (store/records s))))))
