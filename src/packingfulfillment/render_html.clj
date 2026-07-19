@@ -1,0 +1,289 @@
+(ns packingfulfillment.render-html
+  "Build-time HTML renderer for `docs/samples/operator-console.html`.
+  This repo previously had NO demo page and no generator at all
+  (cloud-itonami ISCO-08 no-demo backlog, maturity-loop iteration 15).
+  This namespace drives the REAL, compiled `langgraph.graph` StateGraph
+  in `packingfulfillment.actor` (`intake -> advise -> govern -> decide
+  -> commit | request-approval | hold`) through a scenario built from
+  real, exercised store data, and renders the result deterministically
+  -- no invented numbers, no wall-clock content on the page (the
+  store's `add-record!` stamps a real `:timestamp`, deliberately
+  omitted from the printed page so output stays byte-identical across
+  reruns).
+
+  Seed data: practitioner `prac-001` \"Alex Chen\" and order `order-001`
+  `{:declared-item-count 12}` are the REAL fixture values already
+  exercised in `test/packingfulfillment/actor_test.cljc` (used verbatim
+  here, not invented). A second practitioner `prac-002` \"Priya Nair\"
+  and a second order `order-002` `{:declared-item-count 30}` are
+  additional demo entities registered here via the store's own real
+  `register-practitioner!`/`register-order!` protocol calls --
+  disclosed plainly as additions beyond the existing test fixture, not
+  presented as if pre-existing.
+
+  Store threading: `packingfulfillment.actor/build-graph` does NOT
+  close over the store (only the Advisor instance -- see that
+  namespace's docstring: the store is threaded per-call via
+  `run-request!`'s 4th argument, and `run-request!`/`approve!` both
+  return the updated store under `(:store result)`). This generator
+  threads the store value itself through the whole ten-request
+  scenario, call to call, so the audit ledger accumulates across every
+  request exactly as a real caller would use this API -- there is no
+  need to rebuild the graph between calls (unlike repos where the store
+  is baked into the compiled graph at build time).
+
+  Governor rule coverage (`packingfulfillment.governor/check`: 5 hard
+  invariants + 2 escalation invariants). This scenario actually
+  triggers, via the real mock Advisor and real Governor: `no-
+  practitioner`, `scope-boundary` (via an unsupported request type,
+  which the mock Advisor maps to `:unknown`), `no-spec-basis`, and
+  `item-count-mismatch` (4 of 5 hard rules), plus the `flag-safety-
+  concern` escalation invariant (resolved via a real `approve!` call).
+  The 5th hard rule, `no-actuation` (proposal `:effect` must not be
+  `:propose`), and the `low-confidence` escalation invariant are BOTH
+  structurally unreachable through `packingfulfillment.advisor/mock-
+  advisor` and are disclosed here rather than silently omitted:
+  every branch of `mock-advisor`'s `propose` unconditionally sets
+  `:effect :propose` (so `no-actuation` can never fire from this
+  advisor), and every supported request type yields confidence >= 0.75
+  while the only path to a lower confidence (`:unknown`, confidence
+  0.0) already trips the higher-precedence `scope-boundary` hard rule
+  first (`decide-router` checks `:hard?` before `:escalate?`) -- so
+  low-confidence escalation can never be observed in isolation via this
+  advisor.
+
+  Usage: `clojure -M:render-html [out-file]` (default
+  `docs/samples/operator-console.html`)."
+  (:require [clojure.string :as str]
+            [packingfulfillment.store :as store]
+            [packingfulfillment.advisor :as advisor]
+            [packingfulfillment.actor :as actor]))
+
+(defn- seed-store
+  "Real fixture values verbatim from `actor_test.cljc`
+  (`prac-001`/`order-001`), plus a second practitioner/order registered
+  here via the real store API (disclosed, not a pre-existing fixture)."
+  []
+  (-> (store/create-store)
+      (store/register-practitioner! "prac-001" {:name "Alex Chen"})
+      (store/register-order! "order-001" {:declared-item-count 12})
+      (store/register-practitioner! "prac-002" {:name "Priya Nair"})
+      (store/register-order! "order-002" {:declared-item-count 30})))
+
+(def op-specs
+  "The ten-request demo scenario. Each entry is
+  `[label request-map]`; `request-map` is merged straight into
+  `run-request!` -- nothing here is post-processed or faked."
+  [["Reorder packaging supplies"
+    {:type :reorder-packaging-supplies :practitioner-id "prac-001"
+     :supply-type :small-boxes :quantity 200}]
+   ["Log completed order-pack -- item count matches manifest"
+    {:type :log-order-pack :practitioner-id "prac-001" :order-id "order-001"
+     :item-count 12 :package-weight-grams 900}]
+   ["Log completed order-pack -- item count DISAGREES with manifest"
+    {:type :log-order-pack :practitioner-id "prac-001" :order-id "order-001"
+     :item-count 9 :package-weight-grams 700}]
+   ["Record quality check -- NO order citation on file"
+    {:type :record-quality-check :practitioner-id "prac-001"
+     :item-id "item-42" :condition :damaged :notes "torn label, no order on file"}]
+   ["Record quality check -- properly cited"
+    {:type :record-quality-check :practitioner-id "prac-002" :order-id "order-002"
+     :item-id "item-7" :condition :ok :notes "passed inspection"}]
+   ["Coordinate shipment handoff to carrier"
+    {:type :coordinate-shipment-handoff :practitioner-id "prac-002" :order-id "order-002"
+     :carrier :ups-ground :handoff-window "14:00-16:00"}]
+   ["Flag a safety concern"
+    {:type :flag-safety-concern :practitioner-id "prac-001" :order-id "order-001"
+     :concern-type :damaged-goods :detail "crushed box, corner puncture"}]
+   ["Unsupported request type -- attempt to operate packing equipment directly"
+    {:type :operate-packing-equipment :practitioner-id "prac-001"}]
+   ["Unregistered practitioner attempts a reorder"
+    {:type :reorder-packaging-supplies :practitioner-id "prac-999"
+     :supply-type :tape :quantity 50}]
+   ["Log completed order-pack -- item count matches manifest (second practitioner)"
+    {:type :log-order-pack :practitioner-id "prac-002" :order-id "order-002"
+     :item-count 30 :package-weight-grams 4200}]])
+
+(defn- run-op!
+  "Run one request through the real compiled graph against the current
+  `store-instance`. Escalated requests are resolved with a real
+  `approve!` call (human sign-off). Returns a map describing the real
+  outcome plus the (possibly updated) store to carry forward."
+  [graph store-instance label request]
+  (let [result (actor/run-request! graph request {} store-instance)
+        phase (:phase result)]
+    (cond
+      (= :complete phase)
+      {:label label :request request :outcome :auto-committed
+       :store (:store result) :record (last (store/records (:store result)))}
+
+      (= :awaiting-approval phase)
+      (let [approved (actor/approve! result {:approver "shift-lead-1"})]
+        {:label label :request request :outcome :approved-and-committed
+         :store (:store approved) :record (last (store/records (:store approved)))})
+
+      :else
+      {:label label :request request :outcome :hard-hold
+       :store (:store result) :verdict (:decision result)
+       :rule (-> result :decision :violations first :rule)})))
+
+(defn run-demo!
+  "Drive `op-specs` through the real graph, threading the store from
+  call to call so the ledger accumulates. Returns
+  `{:store <final-store> :runs [<run-result> ...]}`."
+  []
+  (let [graph (actor/build-graph (advisor/mock-advisor))]
+    (loop [store (seed-store) specs op-specs acc []]
+      (if (empty? specs)
+        {:store store :runs acc}
+        (let [[label request] (first specs)
+              run (run-op! graph store label request)]
+          (recur (:store run) (rest specs) (conj acc run)))))))
+
+(defn- esc
+  [s]
+  (-> (str s)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(def governor-rules
+  "Static description of the Governor's own contract, straight from
+  `packingfulfillment.governor`'s docstring -- not re-derived, quoted."
+  [{:rule "no-practitioner" :kind :hard
+    :desc "The request's practitioner must be registered."
+    :reachable? true}
+   {:rule "no-actuation" :kind :hard
+    :desc "Proposal :effect must be :propose (the Advisor never dispatches equipment or a carrier itself)."
+    :reachable? false}
+   {:rule "scope-boundary" :kind :hard
+    :desc "Operating physical packing/conveyor/handling equipment directly, acting as shipping carrier of record, and any unrecognized/:unknown op are permanently forbidden."
+    :reachable? true}
+   {:rule "no-spec-basis" :kind :hard
+    :desc "Record-writing proposals (log-order-pack / record-quality-check / coordinate-shipment-handoff) must cite the order/manifest they are grounded in."
+    :reachable? true}
+   {:rule "item-count-mismatch" :kind :hard
+    :desc "A log-order-pack proposal's self-reported item-count must exactly match the order's independently recorded declared item-count."
+    :reachable? true}
+   {:rule "flag-safety-concern" :kind :escalate
+    :desc "Always escalates to human sign-off, even at high confidence and with every other check clean."
+    :reachable? true}
+   {:rule "low-confidence" :kind :escalate
+    :desc "Escalates when proposal confidence is below the 0.6 floor."
+    :reachable? false}])
+
+(defn- outcome-class
+  [outcome]
+  (case outcome
+    :auto-committed "ok"
+    :approved-and-committed "warn"
+    :hard-hold "err"
+    "muted"))
+
+(defn- outcome-label
+  [outcome]
+  (case outcome
+    :auto-committed "auto-committed"
+    :approved-and-committed "escalated -> approved -> committed"
+    :hard-hold "HELD (hard violation)"
+    (name outcome)))
+
+(defn- triggered-rules
+  [runs]
+  (into #{}
+        (comp (filter #(= :hard-hold (:outcome %)))
+              (map :rule))
+        runs))
+
+(defn- any-escalated?
+  [runs]
+  (some #(= :approved-and-committed (:outcome %)) runs))
+
+(defn render
+  [{:keys [store runs]}]
+  (let [triggered (triggered-rules runs)
+        escalated? (any-escalated? runs)
+        rule-hit? (fn [{:keys [rule kind]}]
+                    (case kind
+                      :hard (contains? triggered (keyword rule))
+                      :escalate (case rule
+                                  "flag-safety-concern" escalated?
+                                  false)
+                      false))
+        final-ledger (store/records store)]
+    (str/join
+     "\n"
+     (concat
+      ["<html><head><meta charset=\"utf-8\">"
+       "<title>Packing &amp; Fulfillment Operator Console (ISCO-08 9321)</title>"
+       "<style>"
+       "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+       "margin:0;padding:2rem;background:#0b0d12;color:#e6e9ef;}"
+       "h1{font-size:1.4rem;margin-bottom:0.25rem;}"
+       "h2{font-size:1.05rem;margin-top:2.5rem;color:#9fb2c9;}"
+       "p.sub{color:#8b95a5;margin-top:0;}"
+       "table{border-collapse:collapse;width:100%;margin-top:0.75rem;}"
+       "th,td{border:1px solid #2a2f3a;padding:0.5rem 0.7rem;text-align:left;font-size:0.9rem;vertical-align:top;}"
+       "th{background:#151922;color:#9fb2c9;}"
+       "tr:nth-child(even){background:#11141b;}"
+       ".ok{color:#5fd97a;font-weight:600;}"
+       ".warn{color:#e8c15a;font-weight:600;}"
+       ".err{color:#e0615a;font-weight:600;}"
+       ".critical{color:#ff4d4d;font-weight:700;}"
+       ".muted{color:#7a8291;}"
+       "code{background:#151922;padding:0.1rem 0.35rem;border-radius:3px;}"
+       "</style></head><body>"
+       "<h1>Packing &amp; Fulfillment Operator Console</h1>"
+       "<p class=\"sub\">ISCO-08 9321 &middot; Hand Packers &middot; generated by <code>packingfulfillment.render-html</code> from the real, compiled langgraph StateGraph -- no invented data.</p>"
+
+       "<h2>Registered entities (real store state, pre-scenario)</h2>"
+       "<table><thead><tr><th>Kind</th><th>ID</th><th>Data</th><th>Source</th></tr></thead><tbody>"
+       (str "<tr><td>practitioner</td><td>prac-001</td><td>" (esc {:name "Alex Chen"}) "</td><td class=\"muted\">real fixture (actor_test.cljc)</td></tr>")
+       (str "<tr><td>practitioner</td><td>prac-002</td><td>" (esc {:name "Priya Nair"}) "</td><td class=\"muted\">added here via register-practitioner!</td></tr>")
+       (str "<tr><td>order</td><td>order-001</td><td>" (esc {:declared-item-count 12}) "</td><td class=\"muted\">real fixture (actor_test.cljc)</td></tr>")
+       (str "<tr><td>order</td><td>order-002</td><td>" (esc {:declared-item-count 30}) "</td><td class=\"muted\">added here via register-order!</td></tr>")
+       "</tbody></table>"
+
+       "<h2>Governor action gate (packingfulfillment.governor/check contract)</h2>"
+       "<table><thead><tr><th>Rule</th><th>Kind</th><th>Description</th><th>Triggered in this run?</th></tr></thead><tbody>"]
+      (for [{:keys [rule kind desc reachable?] :as r} governor-rules]
+        (str "<tr><td><code>" (esc rule) "</code></td>"
+             "<td>" (name kind) "</td>"
+             "<td>" (esc desc) "</td>"
+             "<td>"
+             (cond
+               (rule-hit? r) "<span class=\"ok\">yes</span>"
+               (not reachable?) "<span class=\"muted\">structurally unreachable via mock-advisor (see namespace docstring)</span>"
+               :else "<span class=\"muted\">no</span>")
+             "</td></tr>"))
+      ["</tbody></table>"
+
+       "<h2>Audit trail (real outcome of each request, run in order, store threaded across calls)</h2>"
+       "<table><thead><tr><th>#</th><th>Scenario step</th><th>Op</th><th>Outcome</th><th>Detail</th></tr></thead><tbody>"]
+      (map-indexed
+       (fn [i {:keys [label request outcome record verdict rule]}]
+         (str "<tr><td>" (inc i) "</td>"
+              "<td>" (esc label) "</td>"
+              "<td><code>" (esc (:type request)) "</code></td>"
+              "<td class=\"" (outcome-class outcome) "\">" (esc (outcome-label outcome)) "</td>"
+              "<td>"
+              (cond
+                record (esc (dissoc record :timestamp))
+                rule (str "rule: <code>" (esc rule) "</code>")
+                :else "")
+              "</td></tr>"))
+       runs)
+      ["</tbody></table>"
+
+       "<h2>Final audit ledger</h2>"
+       (str "<p>" (count final-ledger) " record(s) committed to the store's own append-only ledger across this scenario (held/rejected requests write nothing).</p>")
+
+       "</body></html>"]))))
+
+(defn -main
+  [& args]
+  (let [out (or (first args) "docs/samples/operator-console.html")
+        result (run-demo!)
+        html (render result)]
+    (spit out html)
+    (println "wrote" out)))
