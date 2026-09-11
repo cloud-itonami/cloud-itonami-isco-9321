@@ -13,7 +13,7 @@
 
   Seed data: practitioner `prac-001` \"Alex Chen\" and order `order-001`
   `{:declared-item-count 12}` are the REAL fixture values already
-  exercised in `test/packingfulfillment/actor_test.cljc` (used verbatim
+  exercised in `test/packingfulfillment/actor_test.cljk` (used verbatim
   here, not invented). A second practitioner `prac-002` \"Priya Nair\"
   and a second order `order-002` `{:declared-item-count 30}` are
   additional demo entities registered here via the store's own real
