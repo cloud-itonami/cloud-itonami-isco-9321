@@ -3,7 +3,7 @@
   end -- not just the individual Advisor/Governor/Store units. Only
   calls public functions (`actor/build-graph`, `actor/run-request!`,
   `actor/approve!`, `store/*`, `advisor/*`)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [packingfulfillment.actor :as actor]
             [packingfulfillment.advisor :as advisor]
             [packingfulfillment.store :as store]))

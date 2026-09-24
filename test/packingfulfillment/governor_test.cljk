@@ -5,7 +5,7 @@
   `governor/...-violations` fn by name, which is a compile error since
   it is not public -- `check` exercises every rule through its real
   call path, so that mistake cannot recur here."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [packingfulfillment.governor :as gov]
             [packingfulfillment.store :as store]))
 
