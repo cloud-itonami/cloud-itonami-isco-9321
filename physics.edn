@@ -1,0 +1,33 @@
+;; What this vertical's robot physically does, declared for
+;; kotoba.robotics.process (kotoba-lang/robotics). `kbb -M:physics` runs it.
+;;
+;; README "Robotics premise": a packing-station robot performs item scanning,
+;; box packing and shipping-label printing (ISCO 9321). Its physical work:
+;; the pick-and-place of an item from the tote into the shipping box at the
+;; station's takt, and an AMR carrying the stack of packed cartons to the
+;; outbound dock.
+;;
+;; Every number without a cited source is marked `estimate` in its :basis.
+;; Replacing an estimate with a sourced value is this bot's growth work.
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isco-9321"
+ :cases
+ [{:id :item-into-box
+   :kind :manipulator
+   :procedure "packing arm moves a 2 kg item from the scan tote into the shipping box, move time varied with the station takt"
+   :params {:l1-m 0.40 :l2-m 0.35 :m1-kg 4.0 :m2-kg 3.0 :payload-kg 2.0
+            :from [0.55 0.10] :to [0.15 0.55] :steps 400}
+   :sweep {:param :duration-s :values [0.4 0.6 0.8 1.2 2.0]}
+   :quantity :peak-tau1-nm
+   :limit {:max 60.0 :basis "estimate: peak shoulder torque of a ~5 kg-payload packing arm"}
+   :boundary {:lo 0.2 :hi 3.0}}
+  {:id :carton-stack-to-dock
+   :kind :transport
+   :procedure "AMR carries a 60 kg stack of packed cartons 40 m to the outbound dock; stack height varied, judged at its emergency-stop deceleration"
+   :params {:mass-kg 100.0 :payload-kg 60.0 :distance-m 40.0 :v-max-mps 1.5 :a-max-mps2 0.8
+            :brake-decel-mps2 2.5 :drive-force-n 400.0 :crr 0.012
+            :cog-height-m 0.25 :support-half-length-m 0.25 :max-time-s 600.0}
+   :sweep {:param :payload-cog-height-m :values [0.5 0.8 1.1 1.4 1.7]}
+   :quantity :min-tipover-margin
+   :limit {:min 0.3 :basis "estimate: keep 30% static-stability margin at emergency-stop deceleration for an unsecured carton stack"}
+   :boundary {:lo 0.3 :hi 2.0}}]}
