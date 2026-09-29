@@ -103,7 +103,7 @@
   effect; LLM parse failures yield confidence 0.0 (forces escalation).
   NOT wired to a real model in this repository -- this is an honest
   placeholder, not a real integration. See the `build-actor` skill /
-  CLAUDE.md for the swap-in pattern (a real `langchain.model`
+  AGENTS.md for the swap-in pattern (a real `langchain.model`
   chat-model instance)."
   [chat-model]
   (reify Advisor
