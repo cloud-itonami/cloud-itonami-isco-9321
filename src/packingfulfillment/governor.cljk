@@ -6,7 +6,7 @@
   of whether a practitioner is registered, whether an order's declared
   item-count actually matches what was packed, or whether a proposal
   is safe to record, so this MUST be a separate system able to
-  *reject* a proposal (itonami actor pattern, per CLAUDE.md Actors
+  *reject* a proposal (itonami actor pattern, per AGENTS.md Actors
   section).
 
   `:itonami.blueprint/governor` is `:packing-fulfillment-governor`
